@@ -43,6 +43,21 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	// get ready,if nil ret,else handle it(actually),like storage,
+	if d.RaftGroup.HasReady() {
+		rd := d.RaftGroup.Ready()
+
+		//use d.peer.peerStorage change local storage
+		d.peer.peerStorage.SaveReadyState(&rd)
+
+		//use d.ctx send messages
+		d.peer.Send(d.ctx.trans, rd.Messages)
+
+		//process apply
+
+		//advance
+		d.RaftGroup.Advance(rd)
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +129,9 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	//conpress msg to bytes???
+	d.RaftGroup.Propose([]byte(msg.String()))
+	d.proposals = append(d.peer.proposals, &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb})
 }
 
 func (d *peerMsgHandler) onTick() {

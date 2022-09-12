@@ -16,7 +16,6 @@ package raft
 
 import (
 	"errors"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -70,12 +69,36 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+
+	Lead      uint64
+	RaftState StateType
+
+	Term   uint64
+	Vote   uint64
+	Commit uint64
+
+	//log status
+	committed uint64
+
+	lastindex uint64
+	Snapshot  pb.Snapshot
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	raft := newRaft(config)
+	return &RawNode{
+		Raft:      raft,
+		Lead:      0,             //raft.Lead,
+		RaftState: StateFollower, //raft.State,
+		Term:      raft.Term,
+		Vote:      raft.Vote,
+		Commit:    raft.RaftLog.committed, //for hardstate
+		committed: 0,                      //for log
+		lastindex: raft.RaftLog.LastIndex(),
+		Snapshot:  *raft.RaftLog.pendingSnapshot,
+	}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,12 +166,67 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	//msg
+	msgs := rn.Raft.msgs
+
+	//softstate
+	sftstate := func(rn *RawNode) *SoftState {
+		if rn.Lead != rn.Raft.Lead || rn.RaftState != rn.Raft.State {
+			return &SoftState{
+				Lead:      rn.Raft.Lead,
+				RaftState: rn.Raft.State,
+			}
+		}
+		return nil
+	}
+	//hardstate
+	hdstate := func(rn *RawNode) pb.HardState {
+		state := pb.HardState{
+			Term:   rn.Raft.Term,
+			Vote:   rn.Raft.Vote,
+			Commit: rn.Raft.RaftLog.committed,
+		}
+		if rn.Term != rn.Raft.Term || rn.Vote != rn.Raft.Vote || rn.Commit != rn.Raft.RaftLog.committed {
+			return state
+		}
+		return pb.HardState{
+			Term:                 0,
+			Vote:                 0,
+			Commit:               0,
+			XXX_NoUnkeyedLiteral: struct{}{},
+			XXX_unrecognized:     nil,
+			XXX_sizecache:        0,
+		}
+	}
+	//ents
+	ents := []pb.Entry{}
+	for i := rn.lastindex + 1; i <= rn.Raft.RaftLog.LastIndex(); i++ {
+		ents = append(ents, rn.Raft.RaftLog.entries[i-rn.Raft.RaftLog.entries[0].Index])
+	}
+	return Ready{
+		SoftState:        sftstate(rn),
+		HardState:        hdstate(rn),
+		Entries:          ents,
+		Snapshot:         pb.Snapshot{},
+		CommittedEntries: rn.Raft.RaftLog.entries[rn.committed+1-rn.Raft.RaftLog.entries[0].Index : rn.Raft.RaftLog.committed+1-rn.Raft.RaftLog.entries[0].Index],
+		Messages:         msgs,
+	}
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	if len(rn.Raft.msgs) > 0 ||
+		rn.Term != rn.Raft.Term ||
+		rn.Lead != rn.Raft.Lead ||
+		rn.RaftState != rn.Raft.State ||
+		rn.Vote != rn.Raft.Vote ||
+		rn.Commit != rn.Raft.RaftLog.committed ||
+		rn.committed != rn.Raft.RaftLog.committed ||
+		rn.lastindex != rn.Raft.RaftLog.LastIndex() {
+		return true
+	}
+
 	return false
 }
 
@@ -156,6 +234,14 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	rn.Raft.msgs = make([]pb.Message, 0)
+	rn.Term = rn.Raft.Term
+	rn.Lead = rn.Raft.Lead
+	rn.RaftState = rn.Raft.State
+	rn.Vote = rn.Raft.Vote
+	rn.Commit = rn.Raft.RaftLog.committed
+	rn.committed = rn.Raft.RaftLog.committed
+	rn.lastindex = rn.Raft.RaftLog.LastIndex()
 }
 
 // GetProgress return the Progress of this node and its peers, if this
