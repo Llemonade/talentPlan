@@ -187,6 +187,10 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		region := c.GetRegion(key)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
+		log.Debugf("Request Send")
+		for _, r := range reqs {
+			log.Debugf("request:type:%d", r.CmdType)
+		}
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
 		if resp == nil {
 			// it should be timeouted innerly
@@ -360,6 +364,7 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 	req := NewSnapCmd()
 	values := make([][]byte, 0)
 	key := start
+	log.Debugf("start:%s end:%s", key, end)
 	for (len(end) != 0 && bytes.Compare(key, end) < 0) || (len(key) == 0 && len(end) == 0) {
 		resp, txn := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
 		if resp.Header.Error != nil {

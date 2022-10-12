@@ -2,6 +2,9 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -37,16 +40,113 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 		ctx:  ctx,
 	}
 }
+func (d *peerMsgHandler) handleProposal(ent pb.Entry, handler func(p *proposal)) {
+	for len(d.proposals) > 0 {
+		p := d.proposals[0]
+		if p.index == ent.Index {
+			if p.term != ent.Term {
+				NotifyStaleReq(ent.Term, p.cb)
+			} else {
+				handler(p)
+			}
+		}
+		d.proposals = d.proposals[1:]
+	}
+}
 
+func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	req := msg.Requests[0]
+	var key []byte
+	var value []byte
+
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Get:
+		key = req.Get.Key
+
+	case raft_cmdpb.CmdType_Put:
+		key = req.Put.Key
+		value = req.Put.Value
+
+	case raft_cmdpb.CmdType_Delete:
+		key = req.Delete.Key
+
+	case raft_cmdpb.CmdType_Snap:
+		key = nil
+	}
+	log.Debugf("Request : type:%d key:%s value:%s", req.CmdType, key, value)
+	//if key != nil {
+	//	if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+	//		d.handleProposal(ent, func(p *proposal) {
+	//			p.cb.Done(ErrResp(err))
+	//		})
+	//	}
+	//}
+
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Put:
+		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+	case raft_cmdpb.CmdType_Delete:
+		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+	}
+
+	d.handleProposal(ent, func(p *proposal) {
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+		}
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			d.peerStorage.applyState.AppliedIndex = ent.Index
+
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			wb.WriteToDB(d.peerStorage.Engines.Kv)
+			wb = &engine_util.WriteBatch{}
+			val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+			if err != nil {
+				val = nil
+			}
+			resp.Responses = []*raft_cmdpb.Response{{
+				CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{
+					Value: val,
+				},
+			}}
+		case raft_cmdpb.CmdType_Put:
+			resp.Responses = []*raft_cmdpb.Response{{
+				CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{},
+			}}
+		case raft_cmdpb.CmdType_Delete:
+			resp.Responses = []*raft_cmdpb.Response{{
+				CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{},
+			}}
+
+		case raft_cmdpb.CmdType_Snap: // 这里是lab2c才需要考虑的，但是不写会过不了测试
+			d.peerStorage.applyState.AppliedIndex = ent.Index
+
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			wb.WriteToDB(d.ctx.engine.Kv)
+			wb = &engine_util.WriteBatch{}
+			resp.Responses = []*raft_cmdpb.Response{
+				{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+				},
+			}
+			log.Debugf("region: start:%s end:%s", resp.Responses[0].Snap.Region.StartKey, resp.Responses[0].Snap.Region.EndKey)
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+		}
+		p.cb.Done(resp)
+	})
+	return wb
+}
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B).
+	// Your Code Here (2B). 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
 	// get ready,if nil ret,else handle it(actually),like storage,
+
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-
+		log.Debugf("ready COMent length:%d", len(rd.CommittedEntries))
 		//use d.peer.peerStorage change local storage
 		d.peer.peerStorage.SaveReadyState(&rd)
 
@@ -54,13 +154,130 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.peer.Send(d.ctx.trans, rd.Messages)
 
 		//process apply
+		/*for _, ent := range rd.Entries {
+			//initiate writebatch
+			wb := &engine_util.WriteBatch{}
+			//find proposal and delete expired
+			// in this situation, if macth,proposal[0] will always be the needed one
+			for len(d.proposals) > 0 {
+				p := d.proposals[0]
+				if p.index == ent.Index {
+					if p.term != ent.Term {
+						NotifyStaleReq(ent.Term, p.cb)
+					} else {
+						break
+					}
+				}
+				d.proposals = d.proposals[1:]
+			}
 
+			var raftcmdreq raft_cmdpb.RaftCmdRequest
+			err := raft_cmdpb.RaftCmdRequest.Unmarshal(raftcmdreq, ent.Data)
+			if err != nil {
+				return
+			}
+
+			resp := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+			}
+
+			for _, req := range raftcmdreq.Requests {
+				//check operating key lawful
+				var key []byte
+				switch req.CmdType {
+				case raft_cmdpb.CmdType_Get:
+					key = req.Get.Key
+
+				case raft_cmdpb.CmdType_Put:
+					key = req.Put.Key
+
+				case raft_cmdpb.CmdType_Delete:
+					key = req.Delete.Key
+
+				case raft_cmdpb.CmdType_Snap:
+					key = nil
+				}
+
+				if key != nil {
+					if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+						d.proposals[0].cb.Done(ErrResp(err))
+					}
+				}
+				switch req.CmdType {
+				case raft_cmdpb.CmdType_Put:
+					wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+				case raft_cmdpb.CmdType_Delete:
+					wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+				}
+
+				switch req.CmdType {
+				case raft_cmdpb.CmdType_Get:
+					d.peerStorage.applyState.AppliedIndex = ent.Index
+
+					wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					wb.WriteToDB(d.peerStorage.Engines.Kv)
+					wb = &engine_util.WriteBatch{}
+					val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+					if err != nil {
+						val = nil
+					}
+					resp.Responses = []*raft_cmdpb.Response{{
+						CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{
+							Value: val,
+						},
+					}}
+				case raft_cmdpb.CmdType_Put:
+					resp.Responses = []*raft_cmdpb.Response{{
+						CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{},
+					}}
+				case raft_cmdpb.CmdType_Delete:
+					resp.Responses = []*raft_cmdpb.Response{{
+						CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{},
+					}}
+
+				case raft_cmdpb.CmdType_Snap: // 这里是lab2c才需要考虑的，但是不写会过不了测试
+					d.peerStorage.applyState.AppliedIndex = ent.Index
+
+					wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					wb.WriteToDB(d.ctx.engine.Kv)
+					wb = &engine_util.WriteBatch{}
+					resp.Responses = []*raft_cmdpb.Response{
+						{
+							CmdType: raft_cmdpb.CmdType_Snap,
+							Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+						},
+					}
+					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				}
+			}
+
+		}*/
+		for _, ent := range rd.CommittedEntries {
+			log.Debugf("Process Ent:data:%s", ent.Data)
+			wb := &engine_util.WriteBatch{}
+			raftcmdreq := &raft_cmdpb.RaftCmdRequest{}
+			err := (*raft_cmdpb.RaftCmdRequest).Unmarshal(raftcmdreq, ent.Data)
+			if err != nil {
+				return
+			}
+			if len(ent.Data) == 0 {
+				log.Debugf("empty entry!!!")
+				continue
+			}
+
+			err = d.processNormalEntry(ent, raftcmdreq, wb).WriteToDB(d.ctx.engine.Kv)
+			if err != nil {
+				return
+			}
+
+		}
 		//advance
 		d.RaftGroup.Advance(rd)
 	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
+	log.Debugf("Message handling: Type:%d", msg.Type)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -129,9 +346,19 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
-	//conpress msg to bytes???
-	d.RaftGroup.Propose([]byte(msg.String()))
-	d.proposals = append(d.peer.proposals, &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb})
+	//conpress msg to bytes??? use marshal serialization
+	if msg.AdminRequest == nil {
+		d.proposals = append(d.proposals, &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb})
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	log.Debugf("propose data:%s", data)
+	err = d.RaftGroup.Propose(data)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (d *peerMsgHandler) onTick() {

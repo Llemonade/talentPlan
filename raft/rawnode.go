@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -203,12 +204,20 @@ func (rn *RawNode) Ready() Ready {
 	for i := rn.lastindex + 1; i <= rn.Raft.RaftLog.LastIndex(); i++ {
 		ents = append(ents, rn.Raft.RaftLog.entries[i-rn.Raft.RaftLog.entries[0].Index])
 	}
+	COMents := []pb.Entry{}
+	if len(rn.Raft.RaftLog.entries) > 0 {
+		start := rn.committed + 1 - rn.Raft.RaftLog.entries[0].Index
+		end := rn.Raft.RaftLog.committed + 1 - rn.Raft.RaftLog.entries[0].Index
+		if start <= end && start >= 0 && int(end) <= len(rn.Raft.RaftLog.entries) {
+			COMents = rn.Raft.RaftLog.entries[start:end]
+		}
+	}
 	return Ready{
 		SoftState:        sftstate(rn),
 		HardState:        hdstate(rn),
 		Entries:          ents,
 		Snapshot:         pb.Snapshot{},
-		CommittedEntries: rn.Raft.RaftLog.entries[rn.committed+1-rn.Raft.RaftLog.entries[0].Index : rn.Raft.RaftLog.committed+1-rn.Raft.RaftLog.entries[0].Index],
+		CommittedEntries: COMents,
 		Messages:         msgs,
 	}
 }
@@ -216,6 +225,7 @@ func (rn *RawNode) Ready() Ready {
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	log.Debugf("ID:%d msgs num: %d", rn.Raft.id, len(rn.Raft.msgs))
 	if len(rn.Raft.msgs) > 0 ||
 		rn.Term != rn.Raft.Term ||
 		rn.Lead != rn.Raft.Lead ||

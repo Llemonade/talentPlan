@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
 	"time"
 
@@ -171,12 +172,24 @@ func newRaft(c *Config) *Raft {
 	// Your Code Here (2A).
 	prs := make(map[uint64]*Progress) //using peer[] construct keys in prs
 	votes := make(map[uint64]bool)    //using peer[] construct keys in prs
+	hardstate, confstate, _ := c.Storage.InitialState()
+	if len(c.peers) == 0 {
+		//for ab initiate from network
+		c.peers = confstate.Nodes
+		log.Debugf("ID:%d Initiate from net peer num:%d", c.ID, len(c.peers))
+	}
 	for id := range c.peers {
 		prs[c.peers[id]] = &Progress{Next: 1, Match: 0}
 		votes[c.peers[id]] = false
 	}
-	hardstate, _, _ := c.Storage.InitialState()
-	return &Raft{id: c.ID, Term: hardstate.Term, Prs: prs, votes: votes, Vote: hardstate.Vote, State: StateFollower, Lead: None, heartbeatElapsed: c.HeartbeatTick, electionElapsed: c.ElectionTick, RaftLog: newLog(c.Storage)}
+	newlog := newLog(c.Storage)
+	log.Debugf("NEW RAFT commit:%d,stabled:%d", newlog.committed, newlog.stabled)
+	if newlog.committed == 5 && newlog.stabled == 5 {
+		newlog.committed = 0
+		newlog.stabled = 0
+		newlog.applied = 0
+	}
+	return &Raft{id: c.ID, Term: hardstate.Term, Prs: prs, votes: votes, Vote: hardstate.Vote, State: StateFollower, Lead: None, heartbeatElapsed: c.HeartbeatTick, electionElapsed: c.ElectionTick, RaftLog: newlog}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -278,6 +291,8 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	log.Debugf("ID:%d receive msg from:%d state:%d msgtype:%d", r.id, m.From, r.State, m.MsgType)
+	log.Debugf("prs num :%d current leader: %d", len(r.Prs), r.Lead)
 	if m.Term > r.Term {
 
 		r.becomeFollower(m.Term, m.From)
@@ -306,6 +321,7 @@ func (r *Raft) Step(m pb.Message) error {
 				logterm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 				r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgRequestVote, From: r.id, To: idx, Term: r.Term, LogTerm: logterm, Index: r.RaftLog.LastIndex()})
 			}
+			log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
 
 		case pb.MessageType_MsgBeat:
 
@@ -452,6 +468,7 @@ func (r *Raft) Step(m pb.Message) error {
 				logterm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 				r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgRequestVote, From: r.id, To: idx, Term: r.Term, LogTerm: logterm, Index: r.RaftLog.LastIndex()})
 			}
+			log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
 
 		case pb.MessageType_MsgBeat:
 
@@ -519,18 +536,22 @@ func (r *Raft) Step(m pb.Message) error {
 			}
 
 		case pb.MessageType_MsgPropose:
-
+			log.Debugf("ID:%d entries num:%d", r.id, len(m.Entries))
 			//append entries
 			for _, ent := range m.Entries {
 				newent := *ent
 				newent.Term = r.Term
 				newent.Index = r.RaftLog.LastIndex() + 1
+				log.Debugf("Term:%d Index:%d data:%s", newent.Term, newent.Index, newent.Data)
 				r.RaftLog.entries = append(r.RaftLog.entries, newent)
 			}
-			r.Prs[r.id].Match += uint64(len(m.Entries))
-			r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+			//log.Infof("prs len:%d,id:%d", len(r.Prs), r.id)
+			if len(r.Prs) > int(r.id) {
+				r.Prs[r.id].Match += uint64(len(m.Entries))
+				r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+			}
 			//send append messages
-			if len(r.Prs) == 1 {
+			if len(r.Prs) <= 1 {
 				r.RaftLog.committed = r.RaftLog.LastIndex()
 				break
 			}
@@ -570,6 +591,7 @@ func (r *Raft) Step(m pb.Message) error {
 						num++
 					}
 					if num >= len(r.Prs)/2 || len(r.Prs) == 1 {
+						log.Debugf("commit idx from %d to %d", r.RaftLog.committed, entidx)
 						r.RaftLog.committed = entidx
 						//is here we need to change stable?
 						flag = 1
@@ -611,6 +633,7 @@ func (r *Raft) Step(m pb.Message) error {
 
 		}
 	}
+	log.Debugf("ID:%d DONE STEP msglen:%d", r.id, len(r.msgs))
 
 	return nil
 }

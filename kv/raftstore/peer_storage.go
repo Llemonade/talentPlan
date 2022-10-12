@@ -308,23 +308,27 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	beginidx,_:= ps.LastIndex()
+	beginidx, _ := ps.LastIndex()
 
 	//check if first entry's index match begin index
 
-
-
-	for _,ent:=range entries {
-		beginidx += 1
-		key:=meta.RaftLogKey(ps.region.Id,beginidx)
-		value,_:= ent.Marshal()
-		raftWB.SetCF(engine_util.CfWrite,key,value)
+	idx := 0
+	for _, ent := range entries {
+		if ent.Index > beginidx {
+			break
+		}
+		idx++
 	}
-	err := raftWB.WriteToDB(ps.Engines.Raft)
-	if err != nil {
-		return err
+	entries = entries[idx:]
+	if len(entries) == 0 {
+		return nil
 	}
-
+	for _, ent := range entries {
+		raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent)
+	}
+	//err := raftWB.WriteToDB(ps.Engines.Raft)
+	ps.raftState.LastIndex = entries[len(entries)-1].Index
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 
@@ -348,19 +352,21 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	wb:=new(engine_util.WriteBatch)
+	wb := &engine_util.WriteBatch{}
 	wb.Reset()
 	err := ps.Append(ready.Entries, wb)
 	if err != nil {
 		return nil, err
 	}
-	if !(ready.HardState.Vote==0&&ready.HardState.Commit==0&&ready.HardState.Term==0) {
-		ps.raftState.HardState=&ready.HardState
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
 	}
-	ps.raftState.LastTerm = ready.Term
-	ps.raftState.LastIndex=ready.Entries[len(ready.Entries)-1].Index
+	wb.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	wb.WriteToDB(ps.Engines.Raft)
+	//ps.raftState.LastTerm = ready.Term
+	//ps.raftState.LastIndex = ready.Entries[len(ready.Entries)-1].Index
 	//ps.applyState
-	ps.applyState.AppliedIndex =
+	//ps.applyState.AppliedIndex = ready.
 	//ps.snapState
 	return nil, nil
 }
