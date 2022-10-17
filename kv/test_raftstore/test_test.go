@@ -389,6 +389,7 @@ func TestOnePartition2B(t *testing.T) {
 		s1: s1,
 		s2: s2,
 	})
+	log.Infof("leader in majority, partition doesn't affect write/read")
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	MustGetNone(cluster.engines[s2[0]], []byte("k1"))
@@ -402,6 +403,7 @@ func TestOnePartition2B(t *testing.T) {
 		s1: s1,
 		s2: s2,
 	})
+	log.Infof("old leader in minority, new leader should be elected")
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	cluster.MustPut([]byte("k1"), []byte("changed"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("v1"))
@@ -409,6 +411,7 @@ func TestOnePartition2B(t *testing.T) {
 	cluster.ClearFilters()
 
 	// when partition heals, old leader should sync data
+	log.Infof("partition heals")
 	cluster.MustPut([]byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("changed"))

@@ -272,6 +272,7 @@ func (c *Cluster) GetRegion(key []byte) *metapb.Region {
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
+			log.Debugf("GetRegion: FIND REGION peerslen:%d", len(region.Peers))
 			return region
 		}
 		// We may meet range gap after split, so here we will

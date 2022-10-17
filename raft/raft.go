@@ -203,10 +203,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if lastlogidx > 0 {
 		logterm = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Term
 		logidx = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Index
+	} else {
+		lastlogidx = r.RaftLog.entries[0].Index - 1
 	}
 
 	ents := []*pb.Entry{}
-
 	for idx1 := lastlogidx + 1; idx1 <= r.RaftLog.LastIndex(); idx1++ {
 		ents = append(ents, &r.RaftLog.entries[idx1-r.RaftLog.entries[0].Index])
 	}

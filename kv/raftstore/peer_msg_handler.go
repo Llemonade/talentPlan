@@ -141,7 +141,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B). 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
+	// Your Code Here (2B).  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
 	// get ready,if nil ret,else handle it(actually),like storage,
 
 	if d.RaftGroup.HasReady() {
