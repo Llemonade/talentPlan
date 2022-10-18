@@ -98,7 +98,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 		Commit:    raft.RaftLog.committed, //for hardstate
 		committed: 0,                      //for log
 		lastindex: raft.RaftLog.LastIndex(),
-		Snapshot:  *raft.RaftLog.pendingSnapshot,
+		//Snapshot:  *raft.RaftLog.pendingSnapshot,
 	}, nil
 }
 
@@ -167,6 +167,14 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
+	if rn.Raft.RaftLog.committed < rn.Raft.RaftLog.applied {
+		//log.Fatalf("wtf!!!!!")
+		rn.Raft.RaftLog.applied = rn.Raft.RaftLog.committed
+	}
+	if rn.Raft.RaftLog.LastIndex() <= rn.Raft.RaftLog.stabled {
+		//log.Fatalf("wtf!!!!!")
+		rn.Raft.RaftLog.stabled = rn.Raft.RaftLog.LastIndex()
+	}
 	//msg
 	msgs := rn.Raft.msgs
 
@@ -199,25 +207,25 @@ func (rn *RawNode) Ready() Ready {
 			XXX_sizecache:        0,
 		}
 	}
-	//ents
-	ents := []pb.Entry{}
-	for i := rn.lastindex + 1; i <= rn.Raft.RaftLog.LastIndex(); i++ {
-		ents = append(ents, rn.Raft.RaftLog.entries[i-rn.Raft.RaftLog.entries[0].Index])
-	}
-	COMents := []pb.Entry{}
-	if len(rn.Raft.RaftLog.entries) > 0 {
-		start := rn.committed + 1 - rn.Raft.RaftLog.entries[0].Index
-		end := rn.Raft.RaftLog.committed + 1 - rn.Raft.RaftLog.entries[0].Index
-		if start <= end && start >= 0 && int(end) <= len(rn.Raft.RaftLog.entries) {
-			COMents = rn.Raft.RaftLog.entries[start:end]
-		}
-	}
+	////ents
+	//ents := []pb.Entry{}
+	//for i := rn.lastindex + 1; i <= rn.Raft.RaftLog.LastIndex(); i++ {
+	//	ents = append(ents, rn.Raft.RaftLog.entries[i-rn.Raft.RaftLog.entries[0].Index])
+	//}
+	//COMents := []pb.Entry{}
+	//if len(rn.Raft.RaftLog.entries) > 0 {
+	//	start := rn.committed + 1 - rn.Raft.RaftLog.entries[0].Index
+	//	end := rn.Raft.RaftLog.committed + 1 - rn.Raft.RaftLog.entries[0].Index
+	//	if start <= end && start >= 0 && int(end) <= len(rn.Raft.RaftLog.entries) {
+	//		COMents = rn.Raft.RaftLog.entries[start:end]
+	//	}
+	//}
 	return Ready{
 		SoftState:        sftstate(rn),
 		HardState:        hdstate(rn),
-		Entries:          ents,
+		Entries:          rn.Raft.RaftLog.unstableEntries(), //ents,
 		Snapshot:         pb.Snapshot{},
-		CommittedEntries: COMents,
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(), //COMents,
 		Messages:         msgs,
 	}
 }
@@ -231,9 +239,7 @@ func (rn *RawNode) HasReady() bool {
 		rn.Lead != rn.Raft.Lead ||
 		rn.RaftState != rn.Raft.State ||
 		rn.Vote != rn.Raft.Vote ||
-		rn.Commit != rn.Raft.RaftLog.committed ||
-		rn.committed != rn.Raft.RaftLog.committed ||
-		rn.lastindex != rn.Raft.RaftLog.LastIndex() {
+		rn.Commit != rn.Raft.RaftLog.committed {
 		return true
 	}
 
@@ -250,8 +256,13 @@ func (rn *RawNode) Advance(rd Ready) {
 	rn.RaftState = rn.Raft.State
 	rn.Vote = rn.Raft.Vote
 	rn.Commit = rn.Raft.RaftLog.committed
-	rn.committed = rn.Raft.RaftLog.committed
-	rn.lastindex = rn.Raft.RaftLog.LastIndex()
+	if len(rd.Entries) != 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	if len(rd.CommittedEntries) != 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+	rn.Raft.RaftLog.pendingSnapshot = nil
 }
 
 // GetProgress return the Progress of this node and its peers, if this

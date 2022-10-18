@@ -66,14 +66,14 @@ func newLog(storage Storage) *RaftLog {
 		//ents[0].Term = 1
 	}
 	hardstate, _, _ := storage.InitialState()
-	snapshot, _ := storage.Snapshot()
+	//snapshot, _ := storage.Snapshot()
 	return &RaftLog{
-		storage:         storage,
-		committed:       hardstate.Commit,
-		applied:         stabled - 1,
-		stabled:         stabled - 1,
-		entries:         ents,
-		pendingSnapshot: &snapshot,
+		storage:   storage,
+		committed: hardstate.Commit,
+		applied:   stabled - 1,
+		stabled:   hi,
+		entries:   ents,
+		//pendingSnapshot: &snapshot,
 	}
 }
 
@@ -90,21 +90,30 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return []pb.Entry{}
 	}
+	if l.stabled+1 <= l.entries[0].Index {
+		return l.entries
+	} else {
+		return l.entries[l.stabled+1-l.entries[0].Index:]
+	}
 
-	return l.entries[l.stabled+1-l.entries[0].Index:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return l.entries[l.applied+1-l.entries[0].Index : l.committed+1-l.entries[0].Index]
+	if len(l.entries) > 0 {
+		return l.entries[l.applied+1-l.entries[0].Index : l.committed+1-l.entries[0].Index]
+	} else {
+		return []pb.Entry{}
+	}
+
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return 0
+		return l.stabled
 	}
 	return l.entries[len(l.entries)-1].Index
 }

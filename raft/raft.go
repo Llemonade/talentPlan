@@ -178,18 +178,18 @@ func newRaft(c *Config) *Raft {
 		c.peers = confstate.Nodes
 		log.Debugf("ID:%d Initiate from net peer num:%d", c.ID, len(c.peers))
 	}
+	newlog := newLog(c.Storage)
 	for id := range c.peers {
-		prs[c.peers[id]] = &Progress{Next: 1, Match: 0}
+		prs[c.peers[id]] = &Progress{Next: 0, Match: 0}
 		votes[c.peers[id]] = false
 	}
-	newlog := newLog(c.Storage)
 	log.Debugf("NEW RAFT commit:%d,stabled:%d", newlog.committed, newlog.stabled)
-	if newlog.committed == 5 && newlog.stabled == 5 {
-		newlog.committed = 0
-		newlog.stabled = 0
-		newlog.applied = 0
-	}
-	return &Raft{id: c.ID, Term: hardstate.Term, Prs: prs, votes: votes, Vote: hardstate.Vote, State: StateFollower, Lead: None, heartbeatElapsed: c.HeartbeatTick, electionElapsed: c.ElectionTick, RaftLog: newlog}
+	//if newlog.committed == 5 && newlog.stabled == 5 {
+	//	newlog.committed = 0
+	//	newlog.stabled = 0
+	//	newlog.applied = 0
+	//}
+	return &Raft{id: c.ID, Term: hardstate.Term, Prs: prs, votes: votes, Vote: hardstate.Vote, State: StateFollower, Lead: None, heartbeatElapsed: c.HeartbeatTick, electionElapsed: c.ElectionTick, RaftLog: newlog, votenum: 1}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -197,14 +197,21 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	idx := to
-	lastlogidx := r.Prs[idx].Next - 1
+	lastlogidx := r.Prs[idx].Match
 	logterm := uint64(0)
 	logidx := uint64(0)
-	if lastlogidx > 0 {
-		logterm = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Term
-		logidx = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Index
+	if lastlogidx >= r.RaftLog.entries[0].Index {
+		if lastlogidx-r.RaftLog.entries[0].Index < uint64(len(r.RaftLog.entries)) {
+			logterm = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Term
+			logidx = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Index
+		} else {
+			lastlogidx = r.RaftLog.entries[0].Index - 1
+		}
+
 	} else {
 		lastlogidx = r.RaftLog.entries[0].Index - 1
+		//logterm = r.RaftLog.entries[0].Term
+		//logidx = r.RaftLog.entries[0].Index
 	}
 
 	ents := []*pb.Entry{}
@@ -348,7 +355,11 @@ func (r *Raft) Step(m pb.Message) error {
 					//start to add entries
 					indexoffset := uint64(0)
 					if len(r.RaftLog.entries) != 0 {
-						indexoffset = m.Index + 1 - r.RaftLog.entries[0].Index
+						if m.Index == 0 {
+							indexoffset = 0
+						} else {
+							indexoffset = m.Index + 1 - r.RaftLog.entries[0].Index
+						}
 					}
 					//delete mismatch logs
 					//r.RaftLog.entries = r.RaftLog.entries[:indexoffset]
@@ -408,8 +419,21 @@ func (r *Raft) Step(m pb.Message) error {
 						if m.Index == 0 && len(m.Entries) == 0 {
 							r.RaftLog.committed = m.Commit
 						} else {
-							r.RaftLog.committed = min(m.Commit, r.RaftLog.entries[m.Index-r.RaftLog.entries[0].Index+uint64(len(m.Entries))].Index)
+							if m.Index == 0 {
+								r.RaftLog.committed = min(m.Commit, r.RaftLog.entries[len(r.RaftLog.entries)-1].Index)
+							} else {
+								r.RaftLog.committed = min(m.Commit, r.RaftLog.entries[m.Index-r.RaftLog.entries[0].Index+uint64(len(m.Entries))].Index)
+							}
+
 						}
+						//if r.RaftLog.committed < r.RaftLog.applied {
+						//	//log.Fatalf("wtf!!!!!")
+						//	r.RaftLog.applied = r.RaftLog.committed
+						//}
+						//if r.RaftLog.committed < r.RaftLog.stabled {
+						//	//log.Fatalf("wtf!!!!!")
+						//	r.RaftLog.stabled = r.RaftLog.committed
+						//}
 
 					}
 				}
@@ -491,24 +515,27 @@ func (r *Raft) Step(m pb.Message) error {
 			r.votenum++
 			r.votes[m.From] = !m.Reject
 			agree := 0
+			success := false
 			for id := range r.votes {
 				if r.votes[id] {
 					agree++
 				}
 				if agree > len(r.votes)/2 {
 					r.becomeLeader()
-					r.votenum = 0
-					break
-				} else if r.votenum > uint64(len(r.votes)/2+agree) {
-					r.State = StateFollower
-
-					//reset votes when shift from candidate
-					for idx := range r.votes {
-						r.votes[idx] = false
-					}
-					r.votenum = 0
+					r.votenum = 1
+					success = true
 					break
 				}
+			}
+			if (r.votenum > uint64(len(r.votes)/2+agree)) && !success {
+				r.State = StateFollower
+
+				//reset votes when shift from candidate
+				for idx := range r.votes {
+					r.votes[idx] = false
+				}
+				r.votenum = 1
+				break
 			}
 
 		case pb.MessageType_MsgSnapshot:
@@ -568,10 +595,10 @@ func (r *Raft) Step(m pb.Message) error {
 
 		case pb.MessageType_MsgAppendResponse:
 			if m.Reject == false {
-				if r.Prs[m.From].Next == 0 && r.Prs[m.From].Match == 0 {
-					r.Prs[m.From].Next = m.Index + 1
-					r.Prs[m.From].Match = m.Index
-				}
+				//if r.Prs[m.From].Next == 0 && r.Prs[m.From].Match == 0 {
+				//	r.Prs[m.From].Next = m.Index + 1
+				//	r.Prs[m.From].Match = m.Index
+				//}
 				r.Prs[m.From].Next = m.Index + 1
 				r.Prs[m.From].Match = m.Index
 				//how to determine when to update commit idx?
