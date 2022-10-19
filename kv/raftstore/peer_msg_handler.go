@@ -43,7 +43,9 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 func (d *peerMsgHandler) handleProposal(ent pb.Entry, handler func(p *proposal)) {
 	for len(d.proposals) > 0 {
 		p := d.proposals[0]
+		isfind := false
 		if p.index == ent.Index {
+			isfind = true
 			if p.term != ent.Term {
 				NotifyStaleReq(ent.Term, p.cb)
 			} else {
@@ -51,11 +53,15 @@ func (d *peerMsgHandler) handleProposal(ent pb.Entry, handler func(p *proposal))
 			}
 		}
 		d.proposals = d.proposals[1:]
+		if isfind {
+			return
+		}
 	}
 }
 
 func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	req := msg.Requests[0]
+	//log.Errorf("Req Num:%d", len(msg.Requests))
 	var key []byte
 	var value []byte
 
@@ -74,13 +80,13 @@ func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCm
 		key = nil
 	}
 	log.Debugf("Request : type:%d key:%s value:%s", req.CmdType, key, value)
-	//if key != nil {
-	//	if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
-	//		d.handleProposal(ent, func(p *proposal) {
-	//			p.cb.Done(ErrResp(err))
-	//		})
-	//	}
-	//}
+	if key != nil {
+		if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+			d.handleProposal(ent, func(p *proposal) {
+				p.cb.Done(ErrResp(err))
+			})
+		}
+	}
 
 	switch req.CmdType {
 	case raft_cmdpb.CmdType_Put:
@@ -130,7 +136,7 @@ func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCm
 					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
 				},
 			}
-			log.Debugf("region: start:%s end:%s", resp.Responses[0].Snap.Region.StartKey, resp.Responses[0].Snap.Region.EndKey)
+			//log.Debugf("region: start:%s end:%s", resp.Responses[0].Snap.Region.StartKey, resp.Responses[0].Snap.Region.EndKey)
 			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 		}
 		p.cb.Done(resp)
@@ -146,7 +152,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		log.Debugf("ready COMent length:%d", len(rd.CommittedEntries))
+		//log.Debugf("ready COMent length:%d", len(rd.CommittedEntries))
 		//use d.peer.peerStorage change local storage
 		d.peer.peerStorage.SaveReadyState(&rd)
 
@@ -253,7 +259,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 		}*/
 		for _, ent := range rd.CommittedEntries {
-			log.Debugf("Process Ent:data:%s", ent.Data)
+			//log.Debugf("Process Ent:data:%s", ent.Data)
 			wb := &engine_util.WriteBatch{}
 			raftcmdreq := &raft_cmdpb.RaftCmdRequest{}
 			err := (*raft_cmdpb.RaftCmdRequest).Unmarshal(raftcmdreq, ent.Data)
@@ -261,7 +267,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				return
 			}
 			if len(ent.Data) == 0 {
-				log.Debugf("empty entry!!!")
+				//log.Debugf("empty entry!!!")
 				continue
 			}
 
@@ -277,7 +283,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
-	log.Debugf("Message handling: Type:%d", msg.Type)
+	//log.Debugf("Message handling: Type:%d", msg.Type)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -354,7 +360,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		panic(err)
 	}
-	log.Debugf("propose data:%s", data)
+	//log.Debugf("propose data:%s", data)
 	err = d.RaftGroup.Propose(data)
 	if err != nil {
 		panic(err)
@@ -407,8 +413,8 @@ func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
-	log.Debugf("%s handle raft message %s from %d to %d",
-		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
+	//log.Debugf("%s handle raft message %s from %d to %d",
+	//	d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
 		return nil
 	}
@@ -453,9 +459,9 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 // return false means the message is invalid, and can be ignored.
 func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	regionID := msg.GetRegionId()
-	from := msg.GetFromPeer()
+	//from := msg.GetFromPeer()
 	to := msg.GetToPeer()
-	log.Debugf("[region %d] handle raft message %s from %d to %d", regionID, msg, from.GetId(), to.GetId())
+	//log.Debugf("[region %d] handle raft message %s from %d to %d", regionID, msg, from.GetId(), to.GetId())
 	if to.GetStoreId() != d.storeID() {
 		log.Warnf("[region %d] store not match, to store id %d, mine %d, ignore it",
 			regionID, to.GetStoreId(), d.storeID())

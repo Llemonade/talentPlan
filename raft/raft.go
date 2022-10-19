@@ -183,7 +183,7 @@ func newRaft(c *Config) *Raft {
 		prs[c.peers[id]] = &Progress{Next: 0, Match: 0}
 		votes[c.peers[id]] = false
 	}
-	log.Debugf("NEW RAFT commit:%d,stabled:%d", newlog.committed, newlog.stabled)
+	//log.Debugf("NEW RAFT commit:%d,stabled:%d", newlog.committed, newlog.stabled)
 	//if newlog.committed == 5 && newlog.stabled == 5 {
 	//	newlog.committed = 0
 	//	newlog.stabled = 0
@@ -249,7 +249,7 @@ func (r *Raft) tick() {
 		r.State = StateCandidate
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup, From: r.id, To: r.id, Term: r.Term})
 		rand.Seed(time.Now().UnixNano())
-		r.electionElapsed = (rand.Intn(10) + 10) * r.heartbeatElapsed
+		r.electionElapsed = rand.Intn(10) + 10
 		r.electionTimeout = 0
 	}
 
@@ -299,8 +299,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	log.Debugf("ID:%d receive msg from:%d state:%d msgtype:%d", r.id, m.From, r.State, m.MsgType)
-	log.Debugf("prs num :%d current leader: %d", len(r.Prs), r.Lead)
+	//if !(m.MsgType == pb.MessageType_MsgBeat && r.State != StateLeader) {
+	//	log.Debugf("ID:%d term: %d receive msg from:%d state:%d msgtype:%d msgterm:%d current leader: %d", r.id, r.Term, m.From, r.State, m.MsgType, m.Term, r.Lead)
+	//}
 	if m.Term > r.Term {
 
 		r.becomeFollower(m.Term, m.From)
@@ -329,7 +330,7 @@ func (r *Raft) Step(m pb.Message) error {
 				logterm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 				r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgRequestVote, From: r.id, To: idx, Term: r.Term, LogTerm: logterm, Index: r.RaftLog.LastIndex()})
 			}
-			log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
+			//log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
 
 		case pb.MessageType_MsgBeat:
 
@@ -342,7 +343,7 @@ func (r *Raft) Step(m pb.Message) error {
 			//for pass TestAllServerStepdown2AB
 			r.Lead = m.From
 			//receive msg from leader,reset timer
-			r.heartbeatTimeout = 0
+			r.electionTimeout = 0 //r.heartbeatTimeout = 0//should be election timeout!!!!!!
 
 			reject := false
 			if m.Term < r.Term {
@@ -460,7 +461,7 @@ func (r *Raft) Step(m pb.Message) error {
 			if m.From != r.Lead {
 				break
 			}
-			r.heartbeatTimeout = 0
+			r.electionTimeout = 0 //r.heartbeatTimeout = 0//should be election timeout!!!!!!
 			r.msgs = append(r.msgs, pb.Message{
 				MsgType: pb.MessageType_MsgHeartbeatResponse,
 				To:      m.From,
@@ -493,7 +494,7 @@ func (r *Raft) Step(m pb.Message) error {
 				logterm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 				r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgRequestVote, From: r.id, To: idx, Term: r.Term, LogTerm: logterm, Index: r.RaftLog.LastIndex()})
 			}
-			log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
+			//log.Debugf("ID:%d send msgHup:msglen:%d", r.id, len(r.msgs))
 
 		case pb.MessageType_MsgBeat:
 
@@ -564,13 +565,13 @@ func (r *Raft) Step(m pb.Message) error {
 			}
 
 		case pb.MessageType_MsgPropose:
-			log.Debugf("ID:%d entries num:%d", r.id, len(m.Entries))
+			//log.Debugf("ID:%d entries num:%d", r.id, len(m.Entries))
 			//append entries
 			for _, ent := range m.Entries {
 				newent := *ent
 				newent.Term = r.Term
 				newent.Index = r.RaftLog.LastIndex() + 1
-				log.Debugf("Term:%d Index:%d data:%s", newent.Term, newent.Index, newent.Data)
+				//log.Debugf("Term:%d Index:%d data:%s", newent.Term, newent.Index, newent.Data)
 				r.RaftLog.entries = append(r.RaftLog.entries, newent)
 			}
 			//log.Infof("prs len:%d,id:%d", len(r.Prs), r.id)
@@ -619,7 +620,7 @@ func (r *Raft) Step(m pb.Message) error {
 						num++
 					}
 					if num >= len(r.Prs)/2 || len(r.Prs) == 1 {
-						log.Debugf("commit idx from %d to %d", r.RaftLog.committed, entidx)
+						//log.Debugf("commit idx from %d to %d", r.RaftLog.committed, entidx)
 						r.RaftLog.committed = entidx
 						//is here we need to change stable?
 						flag = 1
@@ -653,7 +654,9 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 
 		case pb.MessageType_MsgHeartbeatResponse:
-			r.sendAppend(m.From)
+			if r.Prs[m.From].Match != r.RaftLog.LastIndex() {
+				r.sendAppend(m.From)
+			}
 
 		case pb.MessageType_MsgTransferLeader:
 
@@ -661,7 +664,7 @@ func (r *Raft) Step(m pb.Message) error {
 
 		}
 	}
-	log.Debugf("ID:%d DONE STEP msglen:%d", r.id, len(r.msgs))
+	//log.Debugf("ID:%d DONE STEP msglen:%d", r.id, len(r.msgs))
 
 	return nil
 }

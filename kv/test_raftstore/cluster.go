@@ -223,7 +223,9 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 			panic(fmt.Sprintf("can't get leader of region %d", regionID))
 		}
 		request.Header.Peer = leader
+		//log.Infof("REQUEST CALLED!")
 		resp, txn := c.CallCommand(request, 1*time.Second)
+		//log.Infof("RESP GET!")
 		if resp == nil {
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
@@ -244,7 +246,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		if resp.Header.Error != nil {
 			err := resp.Header.Error
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
-				log.Debugf("encouter retryable err %+v", resp)
+				//log.Debugf("encouter retryable err %+v", resp)
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
 					leader = err.GetNotLeader().Leader
 				} else {
@@ -272,7 +274,7 @@ func (c *Cluster) GetRegion(key []byte) *metapb.Region {
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
-			log.Debugf("GetRegion: FIND REGION peerslen:%d", len(region.Peers))
+			//log.Debugf("GetRegion: FIND REGION peerslen:%d", len(region.Peers))
 			return region
 		}
 		// We may meet range gap after split, so here we will
