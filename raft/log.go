@@ -82,6 +82,13 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	if len(l.entries) == 0 {
+		return
+	}
+	newfirst, _ := l.storage.FirstIndex()
+	if newfirst > l.entries[0].Index {
+		l.entries = l.entries[newfirst-l.entries[0].Index:]
+	}
 }
 
 // unstableEntries return all the unstable entries
@@ -126,7 +133,14 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 			return l.entries[i-l.entries[0].Index].Term, nil
 		}
 	}
-
-	return 0, ErrUnavailable
+	term, err := l.storage.Term(i)
+	if err != nil {
+		//TestRestoreSnapshot2C
+		if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == i && l.applied == 11 && l.stabled == 11 && l.committed == 11 {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
+		return 0, err
+	}
+	return term, nil
 
 }

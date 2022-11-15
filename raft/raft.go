@@ -179,6 +179,9 @@ func newRaft(c *Config) *Raft {
 		log.Debugf("ID:%d Initiate from net peer num:%d", c.ID, len(c.peers))
 	}
 	newlog := newLog(c.Storage)
+	if c.Applied != 0 {
+		newlog.applied = c.Applied
+	}
 	for id := range c.peers {
 		prs[c.peers[id]] = &Progress{Next: 0, Match: 0}
 		votes[c.peers[id]] = false
@@ -192,30 +195,67 @@ func newRaft(c *Config) *Raft {
 	return &Raft{id: c.ID, Term: hardstate.Term, Prs: prs, votes: votes, Vote: hardstate.Vote, State: StateFollower, Lead: None, heartbeatElapsed: c.HeartbeatTick, electionElapsed: c.ElectionTick, RaftLog: newlog, votenum: 1}
 }
 
+// sendSnapshot 发送快照给别的节点
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot := pb.Snapshot{}
+	if r.RaftLog.pendingSnapshot != nil {
+		snapshot = *r.RaftLog.pendingSnapshot
+	} else {
+		snapshottmp, err := r.RaftLog.storage.Snapshot()
+		if err != nil {
+			return
+		}
+		snapshot = snapshottmp
+	}
+
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snapshot,
+	})
+	//r.Prs[to].Match = snapshot.Metadata.Index
+	//r.Prs[to].Next = snapshot.Metadata.Index + 1
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	idx := to
-	lastlogidx := r.Prs[idx].Match
 	logterm := uint64(0)
 	logidx := uint64(0)
-	if lastlogidx >= r.RaftLog.entries[0].Index {
-		if lastlogidx-r.RaftLog.entries[0].Index < uint64(len(r.RaftLog.entries)) {
-			logterm = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Term
-			logidx = r.RaftLog.entries[lastlogidx-r.RaftLog.entries[0].Index].Index
+	if r.Prs[idx].Next >= r.RaftLog.entries[0].Index {
+		if r.Prs[idx].Next >= r.RaftLog.entries[0].Index+uint64(len(r.RaftLog.entries)) {
+			logidx = r.RaftLog.entries[r.Prs[idx].Next-1-r.RaftLog.entries[0].Index].Index
 		} else {
-			lastlogidx = r.RaftLog.entries[0].Index - 1
+			logidx = r.RaftLog.entries[r.Prs[idx].Next-r.RaftLog.entries[0].Index].Index - 1
 		}
+		term, err := r.RaftLog.Term(logidx)
 
+		if err != nil {
+			term1, err1 := r.RaftLog.storage.Term(logidx)
+			if err1 != nil {
+				// for TestProvideSnap2C
+				//if !(r.RaftLog.committed == 11 && r.RaftLog.applied == 11 && r.RaftLog.stabled == 11) {
+				//	panic(err1)
+				//}
+				panic(err1)
+			} else {
+				logterm = term1
+			}
+
+		} else {
+			logterm = term
+		}
 	} else {
-		lastlogidx = r.RaftLog.entries[0].Index - 1
-		//logterm = r.RaftLog.entries[0].Term
-		//logidx = r.RaftLog.entries[0].Index
+		r.sendSnapshot(to)
+		return false
 	}
 
 	ents := []*pb.Entry{}
-	for idx1 := lastlogidx + 1; idx1 <= r.RaftLog.LastIndex(); idx1++ {
+	for idx1 := r.Prs[idx].Next; idx1 <= r.RaftLog.LastIndex(); idx1++ {
 		ents = append(ents, &r.RaftLog.entries[idx1-r.RaftLog.entries[0].Index])
 	}
 	r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgAppend, From: r.id,
@@ -284,6 +324,9 @@ func (r *Raft) becomeLeader() {
 	for idx := range r.votes {
 		r.votes[idx] = false
 	}
+	for id := range r.Prs {
+		r.Prs[id].Next = r.RaftLog.LastIndex() + 1
+	}
 	// NOTE: Leader should propose a noop entry on its term
 	newent := []*pb.Entry{&pb.Entry{}}
 	//send append
@@ -299,9 +342,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	//if !(m.MsgType == pb.MessageType_MsgBeat && r.State != StateLeader) {
-	//	log.Debugf("ID:%d term: %d receive msg from:%d state:%d msgtype:%d msgterm:%d current leader: %d", r.id, r.Term, m.From, r.State, m.MsgType, m.Term, r.Lead)
-	//}
+	if !(m.MsgType == pb.MessageType_MsgBeat && r.State != StateLeader) {
+		log.Debugf("ID:%d term: %d receive msg from:%d state:%d msgtype:%d msgterm:%d current leader: %d", r.id, r.Term, m.From, r.State, m.MsgType, m.Term, r.Lead)
+	}
 	if m.Term > r.Term {
 
 		r.becomeFollower(m.Term, m.From)
@@ -350,7 +393,7 @@ func (r *Raft) Step(m pb.Message) error {
 				reject = true
 			} else {
 				logterm, err := r.RaftLog.Term(m.Index)
-				if (err != nil || logterm != m.LogTerm) && len(r.RaftLog.entries) != 0 && m.Index != 0 {
+				if err != nil || logterm != m.LogTerm {
 					reject = true
 				} else {
 					//start to add entries
@@ -362,8 +405,6 @@ func (r *Raft) Step(m pb.Message) error {
 							indexoffset = m.Index + 1 - r.RaftLog.entries[0].Index
 						}
 					}
-					//delete mismatch logs
-					//r.RaftLog.entries = r.RaftLog.entries[:indexoffset]
 
 					//check if there are confilts
 					Dindexoffset := indexoffset
@@ -374,19 +415,10 @@ func (r *Raft) Step(m pb.Message) error {
 						} else {
 							if !(ent.Term == r.RaftLog.entries[Dindexoffset].Term && ent.Index == r.RaftLog.entries[Dindexoffset].Index) {
 								confilt = true
+								break
 							}
 						}
 						Dindexoffset++
-					}
-					check, _ := r.RaftLog.storage.LastIndex()
-					if check > r.RaftLog.stabled {
-						r.RaftLog.stabled = check
-					}
-					newstableidx := uint64(0)
-					if confilt {
-						newstableidx = m.Index
-					} else {
-						newstableidx = max(max(m.Index, r.RaftLog.LastIndex()), r.RaftLog.stabled)
 					}
 
 					for _, ent := range m.Entries {
@@ -399,13 +431,7 @@ func (r *Raft) Step(m pb.Message) error {
 						indexoffset++
 					}
 					if len(r.RaftLog.entries) > 0 && confilt {
-						//problem : test case do not apply change to storage ,here we can call append manually but this will change struct Stroage's interface ,if we don't,we cannot pass test.
-						// I think here we should only change stabled index ,and let rawnode.handleReady to actually change the storage
-						//r.RaftLog.storage.Append(r.RaftLog.entries[r.RaftLog.stabled+1-r.RaftLog.entries[0].Index : newstableidx+1-r.RaftLog.entries[0].Index])
-						//a := r.RaftLog.stabled
-						r.RaftLog.stabled = newstableidx
-						//newstableidx = newstableidx
-						//r.RaftLog.stabled = a
+						r.RaftLog.stabled = min(r.RaftLog.stabled, r.RaftLog.entries[Dindexoffset].Index-1)
 					}
 					if confilt && indexoffset < uint64(len(r.RaftLog.entries)) {
 						r.RaftLog.entries = r.RaftLog.entries[:indexoffset]
@@ -427,14 +453,6 @@ func (r *Raft) Step(m pb.Message) error {
 							}
 
 						}
-						//if r.RaftLog.committed < r.RaftLog.applied {
-						//	//log.Fatalf("wtf!!!!!")
-						//	r.RaftLog.applied = r.RaftLog.committed
-						//}
-						//if r.RaftLog.committed < r.RaftLog.stabled {
-						//	//log.Fatalf("wtf!!!!!")
-						//	r.RaftLog.stabled = r.RaftLog.committed
-						//}
 
 					}
 				}
@@ -442,7 +460,6 @@ func (r *Raft) Step(m pb.Message) error {
 			}
 			//send message
 			r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgAppendResponse, Term: r.Term, To: m.From, From: r.id, Index: r.RaftLog.LastIndex(), Commit: r.RaftLog.committed, Reject: reject})
-
 		case pb.MessageType_MsgAppendResponse:
 
 		case pb.MessageType_MsgRequestVote:
@@ -456,6 +473,39 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgRequestVoteResponse:
 
 		case pb.MessageType_MsgSnapshot:
+			resp := pb.Message{
+				MsgType: pb.MessageType_MsgAppendResponse,
+				From:    r.id,
+				To:      m.From,
+				Term:    r.Term}
+			meta := m.Snapshot.Metadata
+			// 1. 如果 term 小于自身的 term 直接拒绝这次快照的数据
+			if m.Term < r.Term {
+				resp.Reject = true
+			} else if r.RaftLog.committed >= meta.Index {
+				// 2. 如果已经提交的日志大于等于快照中的日志，也需要拒绝这次快照
+				// 因为 commit 的日志必定会被 apply，如果被快照中的日志覆盖的话就会破坏一致性
+				resp.Reject = true
+				resp.Index = r.RaftLog.committed
+			} else {
+				// 3. 需要安装日志
+				// 更新日志数据
+				//r.RaftLog.dummyIndex = meta.Index + 1
+				r.RaftLog.committed = meta.Index
+				r.RaftLog.applied = meta.Index
+				r.RaftLog.stabled = meta.Index
+				log.Infof("Snapshot change committed:%d applied:%d stabled:%d", r.RaftLog.committed, r.RaftLog.applied, r.RaftLog.stabled)
+				r.RaftLog.pendingSnapshot = m.Snapshot
+				r.RaftLog.entries = make([]pb.Entry, 0)
+				// 更新集群配置
+				r.Prs = make(map[uint64]*Progress)
+				for _, id := range meta.ConfState.Nodes {
+					r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+				}
+				// 更新 response，提示 leader 更新 nextIndex
+				resp.Index = meta.Index
+			}
+			r.msgs = append(r.msgs, resp)
 
 		case pb.MessageType_MsgHeartbeat:
 			if m.From != r.Lead {
@@ -603,6 +653,9 @@ func (r *Raft) Step(m pb.Message) error {
 				r.Prs[m.From].Next = m.Index + 1
 				r.Prs[m.From].Match = m.Index
 				//how to determine when to update commit idx?
+			} else {
+				r.Prs[m.From].Next--
+				r.sendAppend(m.From)
 			}
 			commitchange := false
 			for _, ent := range r.RaftLog.entries[r.RaftLog.committed+1-r.RaftLog.entries[0].Index:] {
@@ -684,6 +737,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.MsgType != pb.MessageType_MsgSnapshot {
+		m.MsgType = pb.MessageType_MsgSnapshot
+	}
 	r.Step(m)
 }
 

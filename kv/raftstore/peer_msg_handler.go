@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -61,7 +62,9 @@ func (d *peerMsgHandler) handleProposal(ent pb.Entry, handler func(p *proposal))
 
 func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	req := msg.Requests[0]
-	//log.Errorf("Req Num:%d", len(msg.Requests))
+	if len(msg.Requests) > 1 {
+		log.Errorf("Unprocessed Request!")
+	}
 	var key []byte
 	var value []byte
 
@@ -143,18 +146,45 @@ func (d *peerMsgHandler) processNormalEntry(ent pb.Entry, msg *raft_cmdpb.RaftCm
 	})
 	return wb
 }
+func (d *peerMsgHandler) processAdminEntry(ent pb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	req := msg.AdminRequest
+	switch req.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		Compact := req.CompactLog
+		if Compact.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
+			d.peerStorage.applyState.TruncatedState.Index = Compact.CompactIndex
+			d.peerStorage.applyState.TruncatedState.Term = Compact.CompactTerm
+			//wb.SetMeta(meta.ApplyStateKey(d.regionId),d.peerStorage.applyState)
+			//wb.WriteToDB(d.ctx.engine.Kv)
+			//wb = &engine_util.WriteBatch{}
+			d.ScheduleCompactLog(Compact.CompactIndex)
+		}
+
+	}
+	return wb
+}
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B).  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
+	// Your Code Here (2B).
 	// get ready,if nil ret,else handle it(actually),like storage,
 
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
 		//log.Debugf("ready COMent length:%d", len(rd.CommittedEntries))
 		//use d.peer.peerStorage change local storage
-		d.peer.peerStorage.SaveReadyState(&rd)
+		res, _ := d.peer.peerStorage.SaveReadyState(&rd)
+
+		if res != nil && !reflect.DeepEqual(res.PrevRegion, res.Region) {
+			d.SetRegion(res.Region)
+			metaStore := d.ctx.storeMeta
+			metaStore.Lock()
+			metaStore.regions[res.Region.Id] = res.Region
+			metaStore.regionRanges.Delete(&regionItem{res.PrevRegion})
+			metaStore.regionRanges.ReplaceOrInsert(&regionItem{res.Region})
+			metaStore.Unlock()
+		}
 
 		//use d.ctx send messages
 		d.peer.Send(d.ctx.trans, rd.Messages)
@@ -270,12 +300,25 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				//log.Debugf("empty entry!!!")
 				continue
 			}
-
-			err = d.processNormalEntry(ent, raftcmdreq, wb).WriteToDB(d.ctx.engine.Kv)
-			if err != nil {
-				return
+			if raftcmdreq.AdminRequest != nil {
+				err = d.processAdminEntry(ent, raftcmdreq, wb).WriteToDB(d.ctx.engine.Kv)
+				if err != nil {
+					return
+				}
+			} else {
+				err = d.processNormalEntry(ent, raftcmdreq, wb).WriteToDB(d.ctx.engine.Kv)
+				if err != nil {
+					return
+				}
 			}
 
+			wb = &engine_util.WriteBatch{}
+			lastEntry := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+			d.peerStorage.applyState.AppliedIndex = lastEntry.Index
+			if err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState); err != nil {
+				log.Panic(err)
+			}
+			wb.MustWriteToDB(d.peerStorage.Engines.Kv)
 		}
 		//advance
 		d.RaftGroup.Advance(rd)
